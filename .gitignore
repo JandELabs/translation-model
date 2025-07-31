@@ -6,4 +6,4 @@ __pycache__/
 *.pyc
 
 # macOS system files
-.DS_Store
+.DS_Storef
