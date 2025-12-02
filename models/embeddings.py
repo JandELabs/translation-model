@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import math
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 
 class Embeddings(nn.Module):
     def __init__(self, vocab_size, d_model):
@@ -219,3 +221,142 @@ class Transformer(nn.Module):
         decoder_output = self.decoder(tgt, encoder_output, src_mask, tgt_mask)
         
         return decoder_output
+    
+class Vocabulary:
+    def __init__(self):
+        # Special tokens - these MUST be first and in this order
+        self.word2idx = {'<PAD>': 0, '<UNK>': 1, '<START>': 2, '<END>': 3}
+        self.idx2word = {0: '<PAD>', 1: '<UNK>', 2: '<START>', 3: '<END>'}
+        self.word_count = {}
+        self.n_words = 4  # Count of unique words (starts at 4 for special tokens)
+
+    def add_sentence(self, sentence):
+        for word in sentence.split():
+            self.add_word(word)
+
+    def add_word(self, word):
+        if word not in self.word2idx:
+            # add new word
+            self.word2idx[word] = self.n_words
+            self.idx2word[self.n_words] = word
+            self.word_count[word] = 1
+            self.n_words += 1
+        else:
+            # if word exists then increase count
+            self.word_count[word] += 1
+    
+    def sentence_to_ids(self, sentence):
+        ids = []
+        for word in sentence.split():
+            if word in self.word2idx:
+                ids.append(self.word2idx[word])
+            else:
+                ids.append(self.word2idx['<UNK>'])
+        return ids
+    
+    def ids_to_sentence(self, ids):
+        words = []
+        for idx in ids:
+            if idx in self.idx2word:
+                word = self.idx2word[idx]
+                if word not in ['<PAD>', '<START>', '<END>']:
+                    words.append(word)
+        return ' '.join(words)
+    
+def load_parallel_data(filename):
+    """Load parallel English-Twi data."""
+    pairs = []
+    with open(filename, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()  # Remove whitespace
+            if '|' in line:
+                english, twi = line.split('|')
+                pairs.append((english.strip(), twi.strip()))
+    return pairs
+
+def build_vocabularies(pairs):
+    """Build English and Twi vocabularies from parallel data."""
+    english_vocab = Vocabulary()
+    twi_vocab = Vocabulary()
+    
+    for english_sent, twi_sent in pairs:
+        english_vocab.add_sentence(english_sent.lower())
+        twi_vocab.add_sentence(twi_sent.lower())
+    
+    return english_vocab, twi_vocab
+
+class TranslationDataset(Dataset):
+    def __init__(self, pairs, src_vocab, tgt_vocab):
+        self.pairs = pairs
+        self.src_vocab = src_vocab
+        self.tgt_vocab = tgt_vocab
+    
+    def __len__(self):
+        return len(self.pairs)
+    
+    def __getitem__(self, idx):
+        english_sent, twi_sent = self.pairs[idx]
+        
+        src_ids = self.src_vocab.sentence_to_ids(english_sent.lower())
+        tgt_ids = self.tgt_vocab.sentence_to_ids(twi_sent.lower())
+        
+        tgt_input = [self.tgt_vocab.word2idx['<START>']] + tgt_ids
+        tgt_output = tgt_ids + [self.tgt_vocab.word2idx['<END>']]
+        
+        return {
+            'src': torch.tensor(src_ids, dtype=torch.long),
+            'tgt_input': torch.tensor(tgt_input, dtype=torch.long),
+            'tgt_output': torch.tensor(tgt_output, dtype=torch.long)
+        }
+
+def collate_fn(batch):
+    """
+    Pad sequences in a batch to same length.
+    batch: List of dictionaries from __getitem__
+    """
+    # Separate the components
+    src_batch = [item['src'] for item in batch]
+    tgt_input_batch = [item['tgt_input'] for item in batch]
+    tgt_output_batch = [item['tgt_output'] for item in batch]
+    
+    # Pad sequences
+    src_padded = torch.nn.utils.rnn.pad_sequence(src_batch, batch_first=True, padding_value=0)
+    tgt_input_padded = torch.nn.utils.rnn.pad_sequence(tgt_input_batch, batch_first=True, padding_value=0)
+    tgt_output_padded = torch.nn.utils.rnn.pad_sequence(tgt_output_batch, batch_first=True, padding_value=0)
+    
+    return {
+        'src': src_padded,
+        'tgt_input': tgt_input_padded,
+        'tgt_output': tgt_output_padded
+    }
+
+
+def create_dataloaders(pairs, src_vocab, tgt_vocab, batch_size=32, train_split=0.9):
+    """Create train and validation dataloaders."""
+    
+    # Split into train and validation
+    split_idx = int(len(pairs) * train_split)
+    train_pairs = pairs[:split_idx]
+    val_pairs = pairs[split_idx:]
+    
+    # Create datasets
+    train_dataset = TranslationDataset(train_pairs, src_vocab, tgt_vocab)
+    val_dataset = TranslationDataset(val_pairs, src_vocab, tgt_vocab)
+    
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn
+    )
+    
+    return train_loader, val_loader
+
